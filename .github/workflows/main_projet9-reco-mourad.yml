@@ -48,29 +48,18 @@ jobs:
       
 
   deploy:
-    runs-on: ubuntu-latest
-    needs: build
-    permissions:
-      id-token: write #This is required for requesting the JWT
-      contents: read #This is required for actions/checkout
+  runs-on: ubuntu-latest
+  needs: build
+  steps:
+    - name: Download artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: python-app
 
-    steps:
-      - name: Download artifact from build job
-        uses: actions/download-artifact@v4
-        with:
-          name: python-app
-      
-      - name: Login to Azure
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_1586E0615D634914B15F9038D5345C4F }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_681A36FCBA3D4DC69EFE469E8FB779C0 }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_144C5A9E77034897B44A65A2D2675D03 }}
+    - name: Deploy to Azure Web App
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: 'projet9-reco-mourad'
+        package: .
 
-      - name: 'Deploy to Azure Web App'
-        uses: azure/webapps-deploy@v3
-        id: deploy-to-webapp
-        with:
-          app-name: 'projet9-reco-mourad'
-          slot-name: 'Production'
           
