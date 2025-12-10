@@ -1,0 +1,18 @@
+# Ignorer les données lourdes
+data_prepared/
+*.pkl
+*.h5
+*.keras
+*.model
+*.pt
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environnements
+.env
+*.env
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
