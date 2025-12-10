@@ -1,5 +1,4 @@
 # Ignorer les données lourdes
-data_prepared/
 *.pkl
 *.h5
 *.keras
