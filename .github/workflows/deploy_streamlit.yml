@@ -1,0 +1,39 @@
+name: Deploy Streamlit app to Azure
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies for Streamlit
+        run: |
+          cd streamlit_app
+          python -m venv venv
+          source venv/bin/activate
+          pip install -r requirements.txt
+
+      - name: Prepare artifact for deployment
+        run: |
+          cd streamlit_app
+          zip -r ../streamlit_app.zip .
+
+      - name: Deploy to Azure Web App (Streamlit)
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: "projet9-streamlit-mourad"
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_STREAMLIT }}
+          package: "streamlit_app.zip"
