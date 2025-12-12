@@ -1,74 +1,181 @@
-from fastapi import FastAPI
-from typing import Dict, List
+# api/app.py
+import os
 import numpy as np
 import pandas as pd
-import os
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from sklearn.metrics.pairwise import cosine_similarity
 
-app = FastAPI(title="API de recommandation - Projet 9")
+# =========================
+# Config / chemins artefacts
+# =========================
+ARTIFACTS_DIR = os.getenv("ARTIFACTS_DIR", "artifacts")
 
-# ====== Chargement des artefacts au démarrage ======
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
+PATH_EMB = os.path.join(ARTIFACTS_DIR, "articles_emb_pca.pkl")
+PATH_CLICKS = os.path.join(ARTIFACTS_DIR, "clicks_df.pkl")
 
-U_PATH = os.path.join(REPO_DIR, "models", "collaborative", "U.npy")
-V_PATH = os.path.join(REPO_DIR, "models", "collaborative", "V.npy")
-USER_INDEX_PATH = os.path.join(REPO_DIR, "models", "collaborative", "user_index.npy")
-ITEM_INDEX_PATH = os.path.join(REPO_DIR, "models", "collaborative", "item_index.npy")
-ARTICLES_PATH = os.path.join(REPO_DIR, "data_prepared", "articles_metadata_clean.csv")
+PATH_U = os.path.join(ARTIFACTS_DIR, "collab_U.npy")
+PATH_V = os.path.join(ARTIFACTS_DIR, "collab_V.npy")
+PATH_USER_INDEX = os.path.join(ARTIFACTS_DIR, "collab_user_index.npy")
+PATH_ITEM_INDEX = os.path.join(ARTIFACTS_DIR, "collab_item_index.npy")
 
-U = np.load(U_PATH)
-V = np.load(V_PATH)
-user_index = np.load(USER_INDEX_PATH)     # array de vrais user_id
-item_index = np.load(ITEM_INDEX_PATH)     # array de vrais article_id
-articles_df = pd.read_csv(ARTICLES_PATH)
 
-# Pour accélérer les lookups
-user_set = set(user_index.tolist())
-item_set = set(item_index.tolist())
+# =========================
+# Chargement au démarrage
+# =========================
+articles_emb_pca = None
+clicks_df = None
 
-@app.get("/")
-def root():
-    return {"message": "API de recommandation OK", "model": "collaborative"}
+U = None
+V = None
+user_index = None
+item_index = None
 
-def cf_recommend_articles(user_id: int, n_reco: int = 5) -> List[int]:
-    # cold-start
-    if user_id not in user_set:
+def load_artifacts():
+    global articles_emb_pca, clicks_df, U, V, user_index, item_index
+
+    # Content-based
+    if os.path.exists(PATH_EMB):
+        articles_emb_pca = pd.read_pickle(PATH_EMB)
+        # sécurité types
+        articles_emb_pca.index = articles_emb_pca.index.astype(int)
+    else:
+        articles_emb_pca = None
+
+    if os.path.exists(PATH_CLICKS):
+        clicks_df = pd.read_pickle(PATH_CLICKS)
+        clicks_df["user_id"] = clicks_df["user_id"].astype(int)
+        clicks_df["click_article_id"] = clicks_df["click_article_id"].astype(int)
+    else:
+        clicks_df = None
+
+    # Collaborative
+    if all(os.path.exists(p) for p in [PATH_U, PATH_V, PATH_USER_INDEX, PATH_ITEM_INDEX]):
+        U = np.load(PATH_U)
+        V = np.load(PATH_V)
+        user_index = np.load(PATH_USER_INDEX)
+        item_index = np.load(PATH_ITEM_INDEX)
+        # sécurité types
+        user_index = user_index.astype(int)
+        item_index = item_index.astype(int)
+    else:
+        U = V = user_index = item_index = None
+
+
+# =========================
+# Modèles
+# =========================
+def content_based_recommend_articles(user_id: int, n_reco: int = 5):
+    if articles_emb_pca is None or clicks_df is None:
         return []
 
-    u_pos = int(np.where(user_index == user_id)[0][0])
+    user_id = int(user_id)
+
+    # articles lus
+    articles_read = (
+        clicks_df.loc[clicks_df["user_id"] == user_id, "click_article_id"]
+        .astype(int)
+        .unique()
+        .tolist()
+    )
+    if len(articles_read) == 0:
+        return []
+
+    # garder seulement ceux présents dans embeddings
+    articles_read = [a for a in articles_read if a in articles_emb_pca.index]
+    if len(articles_read) == 0:
+        return []
+
+    emb_read = articles_emb_pca.loc[articles_read]
+    candidates = articles_emb_pca.drop(index=articles_read, errors="ignore")
+
+    sim_matrix = cosine_similarity(emb_read.values, candidates.values)
+    sim_scores = sim_matrix.max(axis=0)
+
+    best_idx = np.argsort(sim_scores)[::-1][:n_reco]
+    return candidates.index[best_idx].tolist()
+
+
+def cf_recommend_articles(user_id: int, n_reco: int = 5):
+    if any(x is None for x in [U, V, user_index, item_index, clicks_df]):
+        return []
+
+    user_id = int(user_id)
+
+    # cold-start
+    if user_id not in set(user_index):
+        return []
+
+    u_pos = np.where(user_index == user_id)[0][0]
     user_vec = U[u_pos]  # (k,)
 
     scores = V @ user_vec  # (n_items,)
 
-    # Top-N (sans filtrer les déjà lus ici, car on n'a pas clicks_train_df côté API)
-    # => simple et rapide, acceptable pour MVP
+    # retirer déjà lus
+    read_items = (
+        clicks_df.loc[clicks_df["user_id"] == user_id, "click_article_id"]
+        .astype(int)
+        .unique()
+    )
+    read_mask = np.isin(item_index, read_items)
+    scores = scores.copy()
+    scores[read_mask] = -np.inf
+
+    # top-N
     best_idx = np.argpartition(scores, -n_reco)[-n_reco:]
     best_idx = best_idx[np.argsort(scores[best_idx])[::-1]]
+    return item_index[best_idx].tolist()
 
-    return item_index[best_idx].astype(int).tolist()
+
+# =========================
+# API
+# =========================
+app = FastAPI(title="API de recommandation - Projet 9")
+
+# CORS (Streamlit -> API)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # OK pour projet OC
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.on_event("startup")
+def startup_event():
+    load_artifacts()
+
+@app.get("/")
+def root():
+    return {"message": "API de recommandation OK"}
+
+@app.get("/health")
+def health():
+    return {
+        "content_based_loaded": articles_emb_pca is not None and clicks_df is not None,
+        "collaborative_loaded": all(x is not None for x in [U, V, user_index, item_index, clicks_df]),
+    }
 
 @app.get("/reco")
-def get_recommendations(user_id: int, n: int = 5) -> Dict:
-    reco_ids = cf_recommend_articles(user_id=user_id, n_reco=n)
+def get_recommendations(user_id: int, n: int = 5, model: str = "content"):
+    """
+    model: 'content' ou 'collaborative'
+    """
+    model = (model or "content").lower().strip()
 
-    if len(reco_ids) == 0:
-        return {"user_id": user_id, "recommendations": [], "error": "Utilisateur inconnu ou pas de reco"}
+    # user inconnu
+    if clicks_df is None or user_id not in set(clicks_df["user_id"].unique()):
+        return {"user_id": int(user_id), "model": model, "recommendations": []}
 
-    reco_details = articles_df[articles_df["article_id"].isin(reco_ids)].copy()
+    if model == "content":
+        reco_ids = content_based_recommend_articles(user_id, n_reco=n)
+    elif model in ["collaborative", "collab", "cf"]:
+        reco_ids = cf_recommend_articles(user_id, n_reco=n)
+    else:
+        return {"user_id": int(user_id), "model": model, "recommendations": []}
 
-    # Pour garder l'ordre des reco
-    order = {aid: i for i, aid in enumerate(reco_ids)}
-    reco_details["rank"] = reco_details["article_id"].map(order)
-    reco_details = reco_details.sort_values("rank").drop(columns=["rank"])
-
-    recos = []
-    for _, row in reco_details.iterrows():
-        recos.append({
-            "article_id": int(row["article_id"]),
-            "category_id": int(row["category_id"]),
-            "created_at_ts": int(row["created_at_ts"]),
-            "publisher_id": int(row["publisher_id"]),
-            "words_count": int(row["words_count"])
-        })
-
-    return {"user_id": user_id, "recommendations": recos}
+    return {
+        "user_id": int(user_id),
+        "model": model,
+        "recommendations": [{"article_id": int(x)} for x in reco_ids],
+    }

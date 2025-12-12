@@ -1,27 +1,61 @@
-import streamlit as st
+# streamlit/app.py
+import os
 import requests
+import streamlit as st
 
-st.set_page_config(page_title="Recommandation - Projet 9", layout="centered")
-st.title("📚 Système de recommandation d'articles")
+st.set_page_config(page_title="Recommandation d'articles", layout="centered")
+st.title("📚 Recommandation d'articles")
 
-API_URL = st.text_input("URL de l'API", value="http://localhost:8000")
+# URL API cachée (variable d’environnement sur Azure)
+# Exemple: https://ton-api.azurewebsites.net
+API_BASE_URL = os.getenv("API_BASE_URL", "").strip().rstrip("/")
 
-user_id = st.number_input("user_id", min_value=0, value=14572, step=1)
-n = st.slider("Nombre de recommandations", min_value=1, max_value=10, value=5)
+if not API_BASE_URL:
+    st.error("API_BASE_URL n'est pas configuré sur Azure (variable d'environnement).")
+    st.stop()
 
-if st.button("Recommander"):
+# UI
+user_id = st.number_input(
+    "Choisir un id de user",
+    min_value=0,
+    value=15,
+    step=1
+)
+
+model_label = st.selectbox(
+    "Choisir le type de recommandation",
+    ["Content-Based", "Collaborative Filtering"]
+)
+model = "content" if model_label == "Content-Based" else "collaborative"
+
+n = st.slider("Nombre de recommandations", 1, 10, 5)
+
+if st.button("Soumettre"):
     try:
-        r = requests.get(f"{API_URL}/reco", params={"user_id": int(user_id), "n": int(n)}, timeout=30)
+        r = requests.get(
+            f"{API_BASE_URL}/reco",
+            params={"user_id": int(user_id), "n": int(n), "model": model},
+            timeout=20
+        )
+
+        # si API renvoie du HTML (crash) => message clair
+        if r.status_code != 200:
+            st.error(f"Erreur API ({r.status_code})")
+            st.write(r.text[:1000])
+            st.stop()
+
         data = r.json()
-
-        if "error" in data:
-            st.warning(data["error"])
-
         recos = data.get("recommendations", [])
-        st.success(f"{len(recos)} recommandation(s) reçue(s)")
 
-        for i, a in enumerate(recos, start=1):
-            st.write(f"**#{i}** — article_id: {a['article_id']} | category: {a['category_id']} | words: {a['words_count']}")
+        st.subheader(f"Articles recommandés pour le user n°{user_id} ({model_label})")
 
+        if not recos:
+            st.warning("Aucune recommandation (utilisateur inconnu ou cold-start).")
+        else:
+            for x in recos:
+                st.write(int(x["article_id"]))
+
+    except requests.exceptions.JSONDecodeError:
+        st.error("Réponse API invalide (pas du JSON). Vérifie que l'API tourne et répond sur /reco.")
     except Exception as e:
         st.error(f"Erreur : {e}")
