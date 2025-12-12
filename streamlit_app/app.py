@@ -1,4 +1,3 @@
-# streamlit_app/app.py
 import os
 import requests
 import streamlit as st
@@ -12,18 +11,21 @@ if not API_BASE_URL:
     st.error("API_BASE_URL n'est pas configuré sur Azure (variable d'environnement).")
     st.stop()
 
-with st.expander("🔎 Debug API (health)", expanded=False):
+with st.expander("🔎 Debug API (health)"):
     try:
-        h = requests.get(f"{API_BASE_URL}/health", timeout=15)
-        st.write("Status:", h.status_code)
-        st.json(h.json() if h.headers.get("content-type", "").startswith("application/json") else {"raw": h.text[:2000]})
+        r = requests.get(f"{API_BASE_URL}/health", timeout=20)
+        st.write("Status:", r.status_code)
+        st.json(r.json())
     except Exception as e:
-        st.error(str(e))
+        st.error(f"Impossible d'appeler /health : {e}")
 
 user_id = st.number_input("Choisir un id de user", min_value=0, value=15, step=1)
 
-model_label = st.selectbox("Choisir le type de recommandation", ["Collaborative Filtering", "Content-Based"])
-model = "collaborative" if model_label == "Collaborative Filtering" else "content"
+model_label = st.selectbox(
+    "Choisir le type de recommandation",
+    ["Content-Based", "Collaborative Filtering"]
+)
+model = "content" if model_label == "Content-Based" else "collaborative"
 
 n = st.slider("Nombre de recommandations", 1, 10, 5)
 
@@ -32,12 +34,12 @@ if st.button("Soumettre"):
         r = requests.get(
             f"{API_BASE_URL}/reco",
             params={"user_id": int(user_id), "n": int(n), "model": model},
-            timeout=20,
+            timeout=30
         )
 
         if r.status_code != 200:
             st.error(f"Erreur API ({r.status_code})")
-            # FastAPI renvoie souvent {"detail": "..."}
+            # FastAPI renvoie {"detail": "..."}
             try:
                 st.json(r.json())
             except Exception:
@@ -52,12 +54,8 @@ if st.button("Soumettre"):
         if not recos:
             st.warning("Aucune recommandation.")
         else:
-            # recos = List[int] (chez toi)
-            for aid in recos:
-                st.write(int(aid))
+            for item in recos:
+                st.write(int(item["article_id"]))
 
-    except requests.exceptions.JSONDecodeError:
-        st.error("Réponse API invalide (pas du JSON).")
-        st.write(r.text[:2000])
     except Exception as e:
         st.error(f"Erreur : {e}")

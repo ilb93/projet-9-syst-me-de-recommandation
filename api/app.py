@@ -1,7 +1,6 @@
-# api/app.py
 import os
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Optional, Dict, Any
 
 import numpy as np
 import pandas as pd
@@ -10,22 +9,65 @@ from fastapi.middleware.cors import CORSMiddleware
 
 
 # =========================
-# Paths (repo)
+# Helpers paths
 # =========================
-BASE_DIR = Path(__file__).resolve().parent          # .../api
-ROOT_DIR = BASE_DIR.parent                          # repo root
+def _candidate_dirs() -> List[Path]:
+    """
+    Azure App Service (Linux) déploie souvent dans /home/site/wwwroot.
+    Selon ton workflow, tu peux n’avoir que /home/site/wwwroot/api (sans models à la racine).
+    On cherche donc dans plusieurs emplacements.
+    """
+    here = Path(__file__).resolve()
+    base_dir = here.parent  # .../api
+    root_dir = base_dir.parent  # .../(repo root) si présent
 
-DATA_DIR = (BASE_DIR / "data_prepared").resolve()
-MODELS_DIR = (ROOT_DIR / "models").resolve()
-COLLAB_DIR = (MODELS_DIR / "collaborative").resolve()
+    candidates = [
+        root_dir,                     # repo root (local)
+        base_dir,                     # api/
+        Path.cwd(),                   # current working dir
+        Path("/home/site/wwwroot"),   # Azure root
+        Path("/home/site/wwwroot/api"),
+        Path("/tmp"),                 # parfois extraction temporaire
+    ]
 
-ARTICLES_EMB_PCA = DATA_DIR / "articles_embeddings_pca.pkl"
-CLICKS = DATA_DIR / "clicks_clean.xls"
+    # dédoublonnage + existants
+    out = []
+    seen = set()
+    for p in candidates:
+        p = p.resolve()
+        if str(p) not in seen:
+            seen.add(str(p))
+            out.append(p)
+    return out
 
-CF_U = COLLAB_DIR / "cf_U.npy"
-CF_V = COLLAB_DIR / "cf_V.npy"
-CF_USER_INDEX = COLLAB_DIR / "cf_user_index.npy"
-CF_ITEM_INDEX = COLLAB_DIR / "cf_item_index.npy"
+
+def _find_first_existing(rel_path: str) -> Optional[Path]:
+    """
+    rel_path exemple: "models/collaborative/cf_U.npy" ou "data_prepared/clicks_clean.xls"
+    """
+    for root in _candidate_dirs():
+        p = (root / rel_path).resolve()
+        if p.exists():
+            return p
+    return None
+
+
+def _read_excel_smart(path: Path) -> pd.DataFrame:
+    """
+    .xls => xlrd obligatoire
+    .xlsx => openpyxl
+    """
+    suffix = path.suffix.lower()
+    if suffix == ".xls":
+        return pd.read_excel(path, engine="xlrd")
+    return pd.read_excel(path)  # openpyxl auto si dispo
+
+
+def _to_int_array(arr: np.ndarray) -> np.ndarray:
+    try:
+        return arr.astype(int)
+    except Exception:
+        return np.array([int(x) for x in arr], dtype=int)
 
 
 # =========================
@@ -35,100 +77,97 @@ app = FastAPI(title="API Recommandation - Projet 9")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # ok PoC
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # =========================
-# Lazy globals
+# Lazy-loaded globals
 # =========================
-_U: Optional[np.ndarray] = None
-_V: Optional[np.ndarray] = None
-_user_index: Optional[np.ndarray] = None
-_item_index: Optional[np.ndarray] = None
+_U = None
+_V = None
+_user_index = None
+_item_index = None
 
-_embeddings: Optional[np.ndarray] = None
-_articles_ids: Optional[np.ndarray] = None
-_clicks_df: Optional[pd.DataFrame] = None
+_embeddings = None
+_articles_ids = None
+_clicks_df = None
 
 
 # =========================
-# Utils
+# Loaders
 # =========================
-def _to_int_array(arr: np.ndarray) -> np.ndarray:
-    # arr peut être dtype object (strings) -> on force proprement
-    try:
-        return arr.astype(int)
-    except Exception:
-        return np.array([int(x) for x in arr], dtype=int)
-
-
-def _safe_load_npy(path: Path) -> np.ndarray:
-    # allow_pickle=True au cas où les index ont été sauvés en object
-    return np.load(path, allow_pickle=True)
-
-
-def load_collab() -> None:
+def load_collab():
     global _U, _V, _user_index, _item_index
-
     if _U is not None:
         return
 
-    missing = [p.name for p in [CF_U, CF_V, CF_USER_INDEX, CF_ITEM_INDEX] if not p.exists()]
+    # Cherche les fichiers à plusieurs endroits
+    CF_U = _find_first_existing("models/collaborative/cf_U.npy") or _find_first_existing("api/models/collaborative/cf_U.npy")
+    CF_V = _find_first_existing("models/collaborative/cf_V.npy") or _find_first_existing("api/models/collaborative/cf_V.npy")
+    CF_USER_INDEX = _find_first_existing("models/collaborative/cf_user_index.npy") or _find_first_existing("api/models/collaborative/cf_user_index.npy")
+    CF_ITEM_INDEX = _find_first_existing("models/collaborative/cf_item_index.npy") or _find_first_existing("api/models/collaborative/cf_item_index.npy")
+
+    missing = []
+    if CF_U is None: missing.append("cf_U.npy")
+    if CF_V is None: missing.append("cf_V.npy")
+    if CF_USER_INDEX is None: missing.append("cf_user_index.npy")
+    if CF_ITEM_INDEX is None: missing.append("cf_item_index.npy")
+
     if missing:
-        raise FileNotFoundError(f"Missing collaborative files in {COLLAB_DIR}: {missing}")
+        # Message clair = ton vrai problème actuel
+        raise FileNotFoundError(
+            "Missing collaborative files. "
+            "Ton workflow Azure déploie probablement seulement le dossier 'api/' "
+            "et donc 'models/' n'est pas présent sur l'App Service. "
+            f"Missing: {missing}. "
+            "Solution simple: déplacer/dupliquer models/collaborative -> api/models/collaborative et commit."
+        )
 
-    _U = _safe_load_npy(CF_U)
-    _V = _safe_load_npy(CF_V)
-    _user_index = _safe_load_npy(CF_USER_INDEX)
-    _item_index = _safe_load_npy(CF_ITEM_INDEX)
+    _U = np.load(CF_U)
+    _V = np.load(CF_V)
+    _user_index = np.load(CF_USER_INDEX, allow_pickle=True)
+    _item_index = np.load(CF_ITEM_INDEX, allow_pickle=True)
 
-    _user_index = _to_int_array(np.array(_user_index))
-    _item_index = _to_int_array(np.array(_item_index))
-
-    # Sécurité: float32
-    _U = np.asarray(_U, dtype=np.float32)
-    _V = np.asarray(_V, dtype=np.float32)
-
-    # Check shapes
-    if _U.ndim != 2 or _V.ndim != 2:
-        raise ValueError(f"U/V must be 2D. Got U:{_U.shape} V:{_V.shape}")
-    if _U.shape[1] != _V.shape[1]:
-        raise ValueError(f"Latent dim mismatch: U:{_U.shape} V:{_V.shape}")
+    _user_index = _to_int_array(_user_index)
+    _item_index = _to_int_array(_item_index)
 
 
-def load_content() -> None:
+def load_content_based():
     global _embeddings, _articles_ids, _clicks_df
-
     if _embeddings is not None:
         return
 
-    _clicks_df = None
-    if CLICKS.exists():
-        _clicks_df = pd.read_excel(CLICKS)
+    # fichiers (déjà dans api/data_prepared chez toi)
+    EMB = _find_first_existing("api/data_prepared/articles_embeddings_pca.pkl") or _find_first_existing("data_prepared/articles_embeddings_pca.pkl")
+    CLICKS = _find_first_existing("api/data_prepared/clicks_clean.xls") or _find_first_existing("data_prepared/clicks_clean.xls")
 
-    _embeddings = None
-    _articles_ids = None
-    if ARTICLES_EMB_PCA.exists():
-        obj = pd.read_pickle(ARTICLES_EMB_PCA)
+    # clicks (xls -> xlrd)
+    if CLICKS is not None:
+        _clicks_df = _read_excel_smart(CLICKS)
+    else:
+        _clicks_df = None
 
+    # embeddings (pickle)
+    if EMB is not None:
+        obj = pd.read_pickle(EMB)
         if isinstance(obj, pd.DataFrame):
-            _embeddings = obj.values.astype(np.float32, copy=False)
+            _embeddings = obj.values
             try:
                 _articles_ids = _to_int_array(obj.index.to_numpy())
             except Exception:
                 _articles_ids = np.arange(len(obj), dtype=int)
-
         elif isinstance(obj, np.ndarray):
-            _embeddings = obj.astype(np.float32, copy=False)
-            _articles_ids = np.arange(len(_embeddings), dtype=int)
-
+            _embeddings = obj
+            _articles_ids = np.arange(len(obj), dtype=int)
         else:
-            arr = np.array(obj)
-            _embeddings = arr.astype(np.float32, copy=False)
+            _embeddings = np.array(obj)
             _articles_ids = np.arange(len(_embeddings), dtype=int)
+    else:
+        _embeddings = None
+        _articles_ids = None
 
 
 # =========================
@@ -136,54 +175,55 @@ def load_content() -> None:
 # =========================
 def recommend_collaborative(user_id: int, n: int) -> List[int]:
     load_collab()
-
     user_id = int(user_id)
-    matches = np.where(_user_index == user_id)[0]
 
-    # cold-start -> renvoie des items valides
-    if matches.size == 0:
+    matches = np.where(_user_index == user_id)[0]
+    if len(matches) == 0:
         return [int(x) for x in _item_index[:n]]
 
     u_idx = int(matches[0])
-
-    # scores = U[u] dot V.T
     scores = _U[u_idx] @ _V.T
     top_idx = np.argsort(scores)[::-1][:n]
     return [int(_item_index[i]) for i in top_idx]
 
 
 def recommend_content(user_id: int, n: int) -> List[int]:
-    load_content()
+    load_content_based()
 
     if _embeddings is None or _articles_ids is None:
-        # fallback collab si dispo
+        # fallback -> collab si dispo
         try:
             load_collab()
             return [int(x) for x in _item_index[:n]]
         except Exception:
             return list(range(n))
 
-    if _clicks_df is None or _clicks_df.empty:
+    if _clicks_df is None:
         return [int(x) for x in _articles_ids[:n]]
 
-    # colonnes (heuristiques)
-    user_col = next((c for c in _clicks_df.columns if c.lower() in ["user_id", "userid", "user"]), None)
-    art_col = next((c for c in _clicks_df.columns if c.lower() in ["article_id", "click_article_id", "id_article", "article"]), None)
+    # colonnes user/article
+    user_col = None
+    article_col = None
 
-    if user_col is None or art_col is None:
+    for c in _clicks_df.columns:
+        if c.lower() in ["user_id", "userid", "user"]:
+            user_col = c
+        if c.lower() in ["article_id", "click_article_id", "id_article", "article"]:
+            article_col = c
+
+    if user_col is None or article_col is None:
         return [int(x) for x in _articles_ids[:n]]
 
     dfu = _clicks_df[_clicks_df[user_col].astype(int) == int(user_id)]
     if dfu.empty:
         return [int(x) for x in _articles_ids[:n]]
 
-    last_article = int(dfu.iloc[-1][art_col])
+    last_article = int(dfu.iloc[-1][article_col])
 
-    pos = np.where(_articles_ids == last_article)[0]
-    if pos.size == 0:
+    try:
+        idx = int(np.where(_articles_ids == last_article)[0][0])
+    except Exception:
         return [int(x) for x in _articles_ids[:n]]
-
-    idx = int(pos[0])
 
     vec = _embeddings[idx]
     denom = (np.linalg.norm(_embeddings, axis=1) * (np.linalg.norm(vec) + 1e-12)) + 1e-12
@@ -204,43 +244,48 @@ def home():
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    # Ne crash pas : juste état des fichiers + tailles
-    files = {
-        "CF_U": str(CF_U),
-        "CF_V": str(CF_V),
-        "CF_USER_INDEX": str(CF_USER_INDEX),
-        "CF_ITEM_INDEX": str(CF_ITEM_INDEX),
-        "ARTICLES_EMB_PCA": str(ARTICLES_EMB_PCA),
-        "CLICKS": str(CLICKS),
-    }
-    exists = {k: Path(v).exists() for k, v in files.items()}
-    return {
-        "status": "ok",
-        "cwd": os.getcwd(),
-        "base_dir": str(BASE_DIR),
-        "root_dir": str(ROOT_DIR),
-        "data_dir": str(DATA_DIR),
-        "models_dir": str(MODELS_DIR),
-        "collab_dir": str(COLLAB_DIR),
-        "files_exist": exists,
-    }
-
-
-@app.get("/debug/files")
-def debug_files():
-    # Très utile si Azure ne pack pas ce que tu crois
-    def ls(p: Path) -> List[str]:
-        if not p.exists():
-            return []
-        return sorted([x.name for x in p.iterdir()])
+    """
+    Permet de voir vite si Azure a bien les fichiers.
+    """
+    def exists(rel: str) -> bool:
+        return _find_first_existing(rel) is not None
 
     return {
-        "repo_root": str(ROOT_DIR),
-        "api_dir": str(BASE_DIR),
-        "data_prepared": ls(DATA_DIR),
-        "models": ls(MODELS_DIR),
-        "collaborative": ls(COLLAB_DIR),
+        "cwd": str(Path.cwd()),
+        "candidates": [str(p) for p in _candidate_dirs()],
+        "has_collab_cf_U": exists("models/collaborative/cf_U.npy") or exists("api/models/collaborative/cf_U.npy"),
+        "has_collab_cf_V": exists("models/collaborative/cf_V.npy") or exists("api/models/collaborative/cf_V.npy"),
+        "has_collab_user_index": exists("models/collaborative/cf_user_index.npy") or exists("api/models/collaborative/cf_user_index.npy"),
+        "has_collab_item_index": exists("models/collaborative/cf_item_index.npy") or exists("api/models/collaborative/cf_item_index.npy"),
+        "has_clicks": exists("api/data_prepared/clicks_clean.xls") or exists("data_prepared/clicks_clean.xls"),
+        "has_embeddings": exists("api/data_prepared/articles_embeddings_pca.pkl") or exists("data_prepared/articles_embeddings_pca.pkl"),
     }
+
+
+@app.get("/reco")
+def reco(
+    user_id: int = Query(..., ge=0),
+    n: int = Query(5, ge=1, le=50),
+    model: str = Query("collaborative", pattern="^(collaborative|content)$"),
+):
+    try:
+        if model == "collaborative":
+            recs = recommend_collaborative(user_id=user_id, n=n)
+        else:
+            recs = recommend_content(user_id=user_id, n=n)
+
+        # ✅ Format aligné Streamlit
+        return {
+            "user_id": int(user_id),
+            "n": int(n),
+            "model": model,
+            "recommendations": [{"article_id": int(x)} for x in recs],
+            "count": int(len(recs)),
+        }
+
+    except Exception as e:
+        # renvoyer l'erreur lisible côté Streamlit
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/debug/users")
@@ -253,31 +298,4 @@ def debug_users():
         "user_id_max": int(_user_index.max()),
         "sample_user_ids": [int(x) for x in _user_index[:20]],
         "sample_item_ids": [int(x) for x in _item_index[:20]],
-        "U_shape": list(_U.shape),
-        "V_shape": list(_V.shape),
     }
-
-
-@app.get("/reco")
-def reco(
-    user_id: int = Query(..., ge=0),
-    n: int = Query(5, ge=1, le=50),
-    model: str = Query("collaborative", regex="^(collaborative|content)$"),
-):
-    try:
-        if model == "collaborative":
-            recs = recommend_collaborative(user_id=user_id, n=n)
-        else:
-            recs = recommend_content(user_id=user_id, n=n)
-
-        return {
-            "user_id": int(user_id),
-            "n": int(n),
-            "model": model,
-            "recommendations": recs,
-            "count": int(len(recs)),
-        }
-
-    except Exception as e:
-        # Important : on remonte le vrai message au lieu de 500 vide
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
