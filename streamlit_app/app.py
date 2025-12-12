@@ -1,23 +1,27 @@
 import streamlit as st
 import requests
 
-st.title("Système de recommandation - Projet 9")
+st.set_page_config(page_title="Recommandation - Projet 9", layout="centered")
+st.title("📚 Système de recommandation d'articles")
 
-# 👉 URL de ton API déployée sur Azure
-api_url = "https://projet9-reco-mourad-haayf0fhb3dda0du.francecentral-01.azurewebsites.net/reco"
+API_URL = st.text_input("URL de l'API", value="http://localhost:8000")
 
-user_id = st.number_input("Entrez un user_id :", value=14572, step=1)
-n = st.number_input("Nombre de recommandations :", value=5, min_value=1, max_value=20, step=1)
+user_id = st.number_input("user_id", min_value=0, value=14572, step=1)
+n = st.slider("Nombre de recommandations", min_value=1, max_value=10, value=5)
 
-if st.button("Obtenir des recommandations"):
+if st.button("Recommander"):
     try:
-        response = requests.get(f"{api_url}?user_id={user_id}&n={n}")
+        r = requests.get(f"{API_URL}/reco", params={"user_id": int(user_id), "n": int(n)}, timeout=30)
+        data = r.json()
 
-        if response.status_code == 200:
-            data = response.json()
-            st.write("### Résultats :")
-            st.json(data)
-        else:
-            st.error(f"Erreur lors de l'appel API (code {response.status_code})")
+        if "error" in data:
+            st.warning(data["error"])
+
+        recos = data.get("recommendations", [])
+        st.success(f"{len(recos)} recommandation(s) reçue(s)")
+
+        for i, a in enumerate(recos, start=1):
+            st.write(f"**#{i}** — article_id: {a['article_id']} | category: {a['category_id']} | words: {a['words_count']}")
+
     except Exception as e:
-        st.error(f"Erreur de connexion à l'API : {e}")
+        st.error(f"Erreur : {e}")
