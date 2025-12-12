@@ -1,4 +1,4 @@
-# streamlit/app.py
+# streamlit_app/app.py
 import os
 import requests
 import streamlit as st
@@ -6,15 +6,18 @@ import streamlit as st
 st.set_page_config(page_title="Recommandation d'articles", layout="centered")
 st.title("📚 Recommandation d'articles")
 
-# URL API cachée (variable d’environnement sur Azure)
-# Exemple: https://ton-api.azurewebsites.net
+# =====================
+# API URL
+# =====================
 API_BASE_URL = os.getenv("API_BASE_URL", "").strip().rstrip("/")
 
 if not API_BASE_URL:
-    st.error("API_BASE_URL n'est pas configuré sur Azure (variable d'environnement).")
+    st.error("API_BASE_URL n'est pas configuré sur Azure.")
     st.stop()
 
+# =====================
 # UI
+# =====================
 user_id = st.number_input(
     "Choisir un id de user",
     min_value=0,
@@ -24,12 +27,16 @@ user_id = st.number_input(
 
 model_label = st.selectbox(
     "Choisir le type de recommandation",
-    ["Content-Based", "Collaborative Filtering"]
+    ["Collaborative Filtering", "Content-Based"]
 )
-model = "content" if model_label == "Content-Based" else "collaborative"
+
+model = "collaborative" if model_label.startswith("Collaborative") else "content"
 
 n = st.slider("Nombre de recommandations", 1, 10, 5)
 
+# =====================
+# Call API
+# =====================
 if st.button("Soumettre"):
     try:
         r = requests.get(
@@ -38,24 +45,21 @@ if st.button("Soumettre"):
             timeout=20
         )
 
-        # si API renvoie du HTML (crash) => message clair
         if r.status_code != 200:
             st.error(f"Erreur API ({r.status_code})")
-            st.write(r.text[:1000])
+            st.code(r.text)
             st.stop()
 
         data = r.json()
         recos = data.get("recommendations", [])
 
-        st.subheader(f"Articles recommandés pour le user n°{user_id} ({model_label})")
+        st.subheader(f"Articles recommandés pour le user {user_id} ({model_label})")
 
         if not recos:
-            st.warning("Aucune recommandation (utilisateur inconnu ou cold-start).")
+            st.warning("Aucune recommandation (cold-start ou utilisateur inconnu).")
         else:
-            for x in recos:
-                st.write(int(x["article_id"]))
+            for article_id in recos:
+                st.write(f"• Article ID : {int(article_id)}")
 
-    except requests.exceptions.JSONDecodeError:
-        st.error("Réponse API invalide (pas du JSON). Vérifie que l'API tourne et répond sur /reco.")
     except Exception as e:
         st.error(f"Erreur : {e}")
