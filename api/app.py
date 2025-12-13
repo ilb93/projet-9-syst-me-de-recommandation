@@ -18,8 +18,8 @@ def _candidate_dirs() -> List[Path]:
     On cherche donc dans plusieurs emplacements.
     """
     here = Path(__file__).resolve()
-    base_dir = here.parent  # .../api
-    root_dir = base_dir.parent  # .../(repo root) si présent
+    base_dir = here.parent          # .../api
+    root_dir = base_dir.parent      # .../(repo root) si présent localement
 
     candidates = [
         root_dir,                     # repo root (local)
@@ -30,11 +30,13 @@ def _candidate_dirs() -> List[Path]:
         Path("/tmp"),                 # parfois extraction temporaire
     ]
 
-    # dédoublonnage + existants
     out = []
     seen = set()
     for p in candidates:
-        p = p.resolve()
+        try:
+            p = p.resolve()
+        except Exception:
+            continue
         if str(p) not in seen:
             seen.add(str(p))
             out.append(p)
@@ -43,7 +45,7 @@ def _candidate_dirs() -> List[Path]:
 
 def _find_first_existing(rel_path: str) -> Optional[Path]:
     """
-    rel_path exemple: "models/collaborative/cf_U.npy" ou "data_prepared/clicks_clean.xls"
+    rel_path exemple: "models/collaborative/cf_U.npy" ou "api/data_prepared/clicks_clean.xls"
     """
     for root in _candidate_dirs():
         p = (root / rel_path).resolve()
@@ -52,15 +54,48 @@ def _find_first_existing(rel_path: str) -> Optional[Path]:
     return None
 
 
-def _read_excel_smart(path: Path) -> pd.DataFrame:
+def _read_table_smart(path: Path) -> pd.DataFrame:
     """
-    .xls => xlrd obligatoire
-    .xlsx => openpyxl
+    Lit une table en gérant:
+    - CSV
+    - Excel (.xls/.xlsx)
+    - cas fréquent: CSV renommé .xls => sniff du header (ex: 'user_id,')
     """
     suffix = path.suffix.lower()
-    if suffix == ".xls":
-        return pd.read_excel(path, engine="xlrd")
-    return pd.read_excel(path)  # openpyxl auto si dispo
+
+    # 1) Extensions explicites
+    if suffix == ".csv":
+        return pd.read_csv(path)
+    if suffix == ".parquet":
+        return pd.read_parquet(path)
+
+    # 2) Excel ou pseudo-excel
+    if suffix in [".xls", ".xlsx"]:
+        # sniff rapide: si ça ressemble à du CSV (ex: b"user_id,")
+        try:
+            with open(path, "rb") as f:
+                head = f.read(128).lower()
+            if b"," in head and (b"user_id" in head or b"article" in head):
+                return pd.read_csv(path)
+        except Exception:
+            pass
+
+        # vrai excel
+        if suffix == ".xls":
+            # nécessite xlrd (xls)
+            return pd.read_excel(path, engine="xlrd")
+        return pd.read_excel(path)
+
+    # 3) Sniff générique si extension inconnue
+    try:
+        with open(path, "rb") as f:
+            head = f.read(128).lower()
+        if b"," in head:
+            return pd.read_csv(path)
+    except Exception:
+        pass
+
+    raise ValueError(f"Format non supporté: {path}")
 
 
 def _to_int_array(arr: np.ndarray) -> np.ndarray:
@@ -104,7 +139,11 @@ def load_collab():
     if _U is not None:
         return
 
-    # Cherche les fichiers à plusieurs endroits
+    # IMPORTANT:
+    # Sur Azure, tu n'as souvent QUE /home/site/wwwroot/api
+    # donc on supporte:
+    # - models/... (local ou si tu déploies toute la repo)
+    # - api/models/... (solution simple: dupliquer les artefacts dans api/)
     CF_U = _find_first_existing("models/collaborative/cf_U.npy") or _find_first_existing("api/models/collaborative/cf_U.npy")
     CF_V = _find_first_existing("models/collaborative/cf_V.npy") or _find_first_existing("api/models/collaborative/cf_V.npy")
     CF_USER_INDEX = _find_first_existing("models/collaborative/cf_user_index.npy") or _find_first_existing("api/models/collaborative/cf_user_index.npy")
@@ -117,7 +156,6 @@ def load_collab():
     if CF_ITEM_INDEX is None: missing.append("cf_item_index.npy")
 
     if missing:
-        # Message clair = ton vrai problème actuel
         raise FileNotFoundError(
             "Missing collaborative files. "
             "Ton workflow Azure déploie probablement seulement le dossier 'api/' "
@@ -140,17 +178,26 @@ def load_content_based():
     if _embeddings is not None:
         return
 
-    # fichiers (déjà dans api/data_prepared chez toi)
+    # embeddings (pickle)
     EMB = _find_first_existing("api/data_prepared/articles_embeddings_pca.pkl") or _find_first_existing("data_prepared/articles_embeddings_pca.pkl")
-    CLICKS = _find_first_existing("api/data_prepared/clicks_clean.xls") or _find_first_existing("data_prepared/clicks_clean.xls")
 
-    # clicks (xls -> xlrd)
+    # clicks:
+    # Ton erreur "Expected BOF record; found b'user_id,'"
+    # => fichier pas vraiment Excel, probablement CSV renommé .xls
+    CLICKS = (
+        _find_first_existing("api/data_prepared/clicks_clean.csv")
+        or _find_first_existing("data_prepared/clicks_clean.csv")
+        or _find_first_existing("api/data_prepared/clicks_clean.xls")
+        or _find_first_existing("data_prepared/clicks_clean.xls")
+        or _find_first_existing("api/data_prepared/clicks_clean.xlsx")
+        or _find_first_existing("data_prepared/clicks_clean.xlsx")
+    )
+
     if CLICKS is not None:
-        _clicks_df = _read_excel_smart(CLICKS)
+        _clicks_df = _read_table_smart(CLICKS)
     else:
         _clicks_df = None
 
-    # embeddings (pickle)
     if EMB is not None:
         obj = pd.read_pickle(EMB)
         if isinstance(obj, pd.DataFrame):
@@ -198,34 +245,46 @@ def recommend_content(user_id: int, n: int) -> List[int]:
         except Exception:
             return list(range(n))
 
-    if _clicks_df is None:
+    if _clicks_df is None or _clicks_df.empty:
         return [int(x) for x in _articles_ids[:n]]
 
-    # colonnes user/article
-    user_col = None
-    article_col = None
-
-    for c in _clicks_df.columns:
-        if c.lower() in ["user_id", "userid", "user"]:
-            user_col = c
-        if c.lower() in ["article_id", "click_article_id", "id_article", "article"]:
-            article_col = c
+    # colonnes user/article (robuste)
+    cols_lower = {c.lower(): c for c in _clicks_df.columns}
+    user_col = cols_lower.get("user_id") or cols_lower.get("userid") or cols_lower.get("user")
+    article_col = (
+        cols_lower.get("article_id")
+        or cols_lower.get("click_article_id")
+        or cols_lower.get("id_article")
+        or cols_lower.get("article")
+    )
 
     if user_col is None or article_col is None:
         return [int(x) for x in _articles_ids[:n]]
 
-    dfu = _clicks_df[_clicks_df[user_col].astype(int) == int(user_id)]
+    # filtrage user
+    dfu = _clicks_df.copy()
+    dfu[user_col] = pd.to_numeric(dfu[user_col], errors="coerce")
+    dfu = dfu[dfu[user_col] == int(user_id)]
+    if dfu.empty:
+        return [int(x) for x in _articles_ids[:n]]
+
+    # dernier article cliqué
+    dfu[article_col] = pd.to_numeric(dfu[article_col], errors="coerce")
+    dfu = dfu.dropna(subset=[article_col])
     if dfu.empty:
         return [int(x) for x in _articles_ids[:n]]
 
     last_article = int(dfu.iloc[-1][article_col])
 
+    # retrouver son index dans embeddings
     try:
         idx = int(np.where(_articles_ids == last_article)[0][0])
     except Exception:
         return [int(x) for x in _articles_ids[:n]]
 
     vec = _embeddings[idx]
+
+    # cosine similarity
     denom = (np.linalg.norm(_embeddings, axis=1) * (np.linalg.norm(vec) + 1e-12)) + 1e-12
     sims = (_embeddings @ vec) / denom
     sims[idx] = -1
@@ -253,12 +312,27 @@ def health() -> Dict[str, Any]:
     return {
         "cwd": str(Path.cwd()),
         "candidates": [str(p) for p in _candidate_dirs()],
+
         "has_collab_cf_U": exists("models/collaborative/cf_U.npy") or exists("api/models/collaborative/cf_U.npy"),
         "has_collab_cf_V": exists("models/collaborative/cf_V.npy") or exists("api/models/collaborative/cf_V.npy"),
         "has_collab_user_index": exists("models/collaborative/cf_user_index.npy") or exists("api/models/collaborative/cf_user_index.npy"),
         "has_collab_item_index": exists("models/collaborative/cf_item_index.npy") or exists("api/models/collaborative/cf_item_index.npy"),
-        "has_clicks": exists("api/data_prepared/clicks_clean.xls") or exists("data_prepared/clicks_clean.xls"),
+
+        # clicks: csv OU excel
+        "has_clicks": (
+            exists("api/data_prepared/clicks_clean.csv")
+            or exists("data_prepared/clicks_clean.csv")
+            or exists("api/data_prepared/clicks_clean.xls")
+            or exists("data_prepared/clicks_clean.xls")
+            or exists("api/data_prepared/clicks_clean.xlsx")
+            or exists("data_prepared/clicks_clean.xlsx")
+        ),
+
         "has_embeddings": exists("api/data_prepared/articles_embeddings_pca.pkl") or exists("data_prepared/articles_embeddings_pca.pkl"),
+
+        # utile pour confirmer le packaging Azure
+        "azure_wwwroot_models_exists": Path("/home/site/wwwroot/models").exists(),
+        "azure_api_models_exists": Path("/home/site/wwwroot/api/models").exists(),
     }
 
 
@@ -274,7 +348,6 @@ def reco(
         else:
             recs = recommend_content(user_id=user_id, n=n)
 
-        # ✅ Format aligné Streamlit
         return {
             "user_id": int(user_id),
             "n": int(n),
@@ -284,7 +357,6 @@ def reco(
         }
 
     except Exception as e:
-        # renvoyer l'erreur lisible côté Streamlit
         raise HTTPException(status_code=500, detail=str(e))
 
 
