@@ -57,21 +57,37 @@ Cette approche exploite les interactions collectives entre utilisateurs et artic
 
  projet-9-syst-me-de-recommandation/
 ├── api/
+
 │ ├── app.py
+
 │ ├── requirements.txt
+
 │ ├── startup.txt
+
 │ ├── data_prepared/
+
 │ │ ├── clicks_clean.csv
+
 │ │ └── articles_embeddings_pca.pkl
+
 │ └── models/
+
 │ └── collaborative/
+
 │ ├── cf_U.npy
+
 │ ├── cf_V.npy
+
 │ ├── cf_user_index.npy
+
 │ └── cf_item_index.npy
+
 ├── streamlit_app/
+
 │ └── app.py
+
 ├── notebooks/
+
 └── README.md
 
 
